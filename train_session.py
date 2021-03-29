@@ -9,6 +9,7 @@ import os
 import utils as ut
 import gym
 from datetime import datetime
+import time
 
 
 class TrainSession:
@@ -189,7 +190,9 @@ class TrainSession:
                 state = env.reset()
                 next_action = agent.episode_init(state)
                 for t in count():
+
                     if graphical:
+                        time.sleep(.05)
                         env.render()
 
                     state, reward, done, _ = env.step(next_action)

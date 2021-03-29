@@ -22,6 +22,8 @@ class DDQN:
         self.update_every = ddqn_init["update_every"]
         self.update_count = 0.0
         self.hard_update_target_every = ddqn_init["hard_update_target_every"]
+        self.train = True
+        self.input_image = ddqn_init["input_image"]
 
         self.random_generator = np.random.RandomState(seed=ddqn_init['seed'])
         self.primary_q_network = QNetwork(ddqn_init['q_network']).to(v.device)
@@ -47,9 +49,11 @@ class DDQN:
 
     def set_test(self):
         self.primary_q_network.eval()
+        self.train = False
 
     def set_train(self):
         self.primary_q_network.train()
+        self.train = True
 
     @staticmethod
     def preprocess_image(state_image, im_size=84):
@@ -59,10 +63,13 @@ class DDQN:
         return np.expand_dims(state_image, axis=0).astype(np.float)
 
     def policy(self, state):
-
+        state = self.preprocess_image(state) if self.input_image else state
         state_tensor = utils.to_tensor(state).view((1, ) + state.shape)
         with torch.no_grad():
             values = self.primary_q_network.predict(state_tensor).squeeze().cpu().numpy()
+
+        if not self.train:
+            return np.argmax(values)
 
         if self.policy_type == 'e-greedy':
             action = self.e_greedy(values)
@@ -101,16 +108,19 @@ class DDQN:
         return action
 
     def update(self, next_state, reward, done):
-        self.replay_buffer.append(deepcopy(self.state), deepcopy(self.action), reward, next_state, done)
+
+        processed_state = DDQN.preprocess_image(self.state) if self.input_image else deepcopy(self.state)
+        processed_next_state = DDQN.preprocess_image(next_state) if self.input_image else next_state
+        self.replay_buffer.append(processed_state, deepcopy(self.action), reward, processed_next_state, done)
 
         if len(self.replay_buffer) > self.update_after and self.update_count % self.update_every == 0.0:
-            states, actions, rewards, next_states, dones = self.replay_buffer.sample()
-
+            states, actions, rewards, next_states, dones = self.replay_buffer.sample(self.input_image)
             next_actions = torch.argmax(self.target_q_network.predict(next_states), axis=1).unsqueeze(-1)
             next_actions_values = self.primary_q_network.action_values_predict(next_states, next_actions)
 
             expected_q_values = rewards + self.discount_factor * (1 - dones) * next_actions_values
             self.primary_q_network.update(expected_q_values, states, actions)
+
             self.soft_update_target_weights()
 
             if self.update_count % self.hard_update_target_every == 0.0:
@@ -151,7 +161,7 @@ class QNetwork(torch.nn.Module):
                 nn.ReLU()
             )
 
-        self.relu = nn.ReLU()
+        self.relu = nn.LeakyReLU(.1)
         self.l1 = nn.Linear(net["l1_shape"], net["l2_shape"])
         self.l2 = nn.Linear(net["l2_shape"], net["l3_shape"])
         self.o = nn.Linear(net["l3_shape"], net["o_shape"])
@@ -200,13 +210,19 @@ class ReplayBuffer:
         e = self.experience(state, action, reward, next_state, done)
         self.buffer.append(e)
 
-    def sample(self):
+    def sample(self, input_image):
         experiences = random.sample(self.buffer, k=self.batch_size)
 
-        states = utils.to_tensor(np.vstack([e.state for e in experiences if e is not None]))
+        states = np.vstack([e.state for e in experiences if e is not None])
+        next_states = np.vstack([e.next_state for e in experiences if e is not None])
+
+        next_states = np.expand_dims(next_states, axis=1) if input_image else next_states
+        states = np.expand_dims(states, axis=1) if input_image else states
+
+        states = utils.to_tensor(states)
+        next_states = utils.to_tensor(next_states)
         actions = utils.to_tensor(np.vstack([e.action for e in experiences if e is not None]))
         rewards = utils.to_tensor(np.vstack([e.reward for e in experiences if e is not None])).squeeze()
-        next_states = utils.to_tensor(np.vstack([e.next_state for e in experiences if e is not None]))
         dones = utils.to_tensor(np.vstack([e.done for e in experiences if e is not None])).squeeze()
 
         return states, actions, rewards, next_states, dones
